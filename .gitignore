@@ -1,0 +1,4 @@
+.venv
+.env
+storage.json
+__pycache__
