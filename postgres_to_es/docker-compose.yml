@@ -1,0 +1,76 @@
+version: '3'
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_DB=movies_database
+      - POSTGRES_USER=app
+      - POSTGRES_PASSWORD=123qwe
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d movies_database -U app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+        - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+        - postgres-data:/usr/share/postgres/data
+    networks:
+      - my-network
+  
+  elasticsearch:
+      image: elasticsearch:8.6.2
+      environment:
+        - discovery.type=single-node
+        - xpack.security.enabled=false
+      ports:
+        - "9200:9200"
+      healthcheck:
+        test: ["CMD-SHELL", "curl -s http://localhost:9200/_cat/health?h=status | grep -q green"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+      volumes:
+        - elastic-data:/usr/share/elasticsearch/data
+      networks:
+        - my-network
+      
+  etl:
+    build: .
+    environment:
+      - POSTGRES_DB_HOST=postgres
+      - POSTGRES_DB_PORT=5432
+      - POSTGRES_DB_USER=app
+      - POSTGRES_DB_PASSWORD=123qwe
+      - POSTGRES_DB_NAME=movies_database
+      - STORAGE_FILE_PATH=/usr/share/etl/data/storage.json
+      - ELASTIC_HOST=http://elasticsearch
+      - ELASTIC_PORT=9200
+      - ELASTIC_INDEX=movies
+      - ETL_START_TIME=1970-01-01 00:00:00.000 +0000
+      - ETL_EXTRACT_SIZE=100
+      - ETL_CHECKING_UPDATES_SLEEP_TIME=60
+      - ETL_ITERATION_SLEEP_TIME=2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+        - etl-data:/usr/share/etl/data
+    networks:
+      - my-network
+
+volumes:
+  postgres-data:
+    driver: local
+  elastic-data:
+    driver: local
+  etl-data:
+    driver: local
+
+networks:
+  my-network:
+    driver: bridge

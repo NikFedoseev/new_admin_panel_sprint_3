@@ -5,14 +5,14 @@ import httpx
 import models
 import json
 from typing import Any
-from utils import get_postges_connection
+from utils import get_postges_connection, logger
 from state import State, JsonFileStorage
 from settings import settings
 from movie_index import movie_index_config
 
 
 class BackoffQueryMixin:
-    @backoff.on_exception(backoff.expo, exception=(psycopg2.OperationalError, psycopg2.InterfaceError))
+    @backoff.on_exception(backoff.expo, exception=(psycopg2.OperationalError, psycopg2.InterfaceError), logger=logger)
     def _execute_query(self, conn: psycopg2.extensions.connection, query: str) -> list[Any]:
         cursor = conn.cursor()
         cursor.execute(query)
@@ -32,8 +32,7 @@ class PostgresProducer:
         'genre',
     )
 
-    def __init__(self, state: State, conn: psycopg2.extensions.connection, extract_size: int) -> None:
-        self.state = state
+    def __init__(self, conn: psycopg2.extensions.connection, extract_size: int) -> None:
         self.conn = conn
         self.extract_size = extract_size
 
@@ -49,7 +48,7 @@ class PostgresProducer:
             ORDER BY modified;
         """
 
-    @backoff.on_exception(backoff.expo, exception=(psycopg2.OperationalError, psycopg2.InterfaceError))
+    @backoff.on_exception(backoff.expo, exception=(psycopg2.OperationalError, psycopg2.InterfaceError), logger=logger)
     def _iter_over_table(self, query):
         cursor = self.conn.cursor()
         cursor.execute(query)
@@ -60,12 +59,9 @@ class PostgresProducer:
                 break
             yield [dict(row) for row in rows]
 
-    def check_updates(self):
+    def check_updates(self, last_updated_time: str):
         for table in self.tables:
-            producer_state = self.state.get_state('etl') or {}
-            modified = producer_state.get('modified') or '1970-01-01 00:00:00.000 +0000'
-
-            query = self._get_query(table_name=table, modified_after=modified)
+            query = self._get_query(table_name=table, modified_after=last_updated_time)
 
             for entity_pack in self._iter_over_table(query):
                 entity_ids = [entity['id'] for entity in entity_pack]
@@ -253,11 +249,12 @@ class Transformer:
 
 
 class ElasticsearchLoader:
-    def __init__(self, service_url: str, index: str) -> None:
+    def __init__(self, service_host: str, service_port: str, index: str) -> None:
         self.client = httpx.Client()
-        self.service_url = service_url
+        self.service_url = f'{service_host}:{service_port}'
         self.index_name = index
 
+    @backoff.on_exception(backoff.expo, exception=(httpx.ConnectError, httpx.ConnectTimeout))
     def _check_index_exists(self):
         response = self.client.head(f"{self.service_url}/{self.index_name}")
         return response.status_code == 200
@@ -266,7 +263,7 @@ class ElasticsearchLoader:
     def _create_index(self):
         self.client.put(f"{self.service_url}/{self.index_name}", json=movie_index_config)
 
-    @backoff.on_exception(backoff.expo, exception=(httpx.ConnectError, httpx.ConnectTimeout))
+    @backoff.on_exception(backoff.expo, exception=(httpx.ConnectError, httpx.ConnectTimeout), logger=logger)
     def upload(self, movies: list[models.Movie]):
         if not self._check_index_exists():
             self._create_index()
@@ -293,29 +290,38 @@ class ElasticsearchLoader:
 
 
 def main():
-    config = settings.model_dump()
-    conn = get_postges_connection(str(config['postgres']['dsn']))
-    state = State(storage=JsonFileStorage(file_path=config['storage']['file_path']))
-    producer = PostgresProducer(state=state, conn=conn, extract_size=config['etl']['extract_size'])
+    logger.info('etl process started')
+    conn = get_postges_connection()
+    state = State(storage=JsonFileStorage(file_path=settings['storage_file_path']))
+    producer = PostgresProducer(conn=conn, extract_size=settings['etl_extract_size'])
     enricher = PostgresEnricher(conn=conn)
     merger = PostgresMerger(conn=conn)
     transformer = Transformer()
-    loader = ElasticsearchLoader(service_url=str(config['elastic']['url']), index=config['elastic']['index'])
+    loader = ElasticsearchLoader(
+        service_host=settings['elastic_host'],
+        service_port=settings['elastic_port'],
+        index=settings['elastic_index']
+    )
 
     while True:
-        updates = producer.check_updates()
+        updates = producer.check_updates(
+            last_updated_time=state.get_state('modified') or settings['etl_start_time']
+        )
 
         for updated_table, updated_entities, modified in updates:
             enriched_entities = enricher.enrich(table=updated_table, entity_ids=updated_entities)
             merged_entities = merger.merge(enriched_entities)
             transformed_entities = transformer.transform(merged_entities)
             loader.upload(transformed_entities)
-            state.set_state(key='etl', value={'modified': modified.strftime('%Y-%m-%d %H:%M:%S.%f %z')})
-            time.sleep(config['etl']['iteration_sleep_time'])
-            print('sleeping over ')
+            state.set_state(key='modified', value=modified.strftime('%Y-%m-%d %H:%M:%S.%f %z'))
 
-        print('sleeping over checking')
-        time.sleep(config['etl']['checking_sleep_time'])
+            logger.info(
+                f"{len(transformed_entities)} updates uploaded, slepping {settings['etl_iteration_sleep_time']} seconds"
+            )
+            time.sleep(settings['etl_iteration_sleep_time'])
+
+        logger.info(f"no updates found, slepping {settings['etl_checking_updates_sleep_time']} seconds")
+        time.sleep(settings['etl_checking_updates_sleep_time'])
 
 
 if __name__ == '__main__':
