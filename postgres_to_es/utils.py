@@ -3,6 +3,7 @@ import sys
 import backoff
 import psycopg2
 import psycopg2.extras
+from contextlib import closing
 from settings import settings
 
 
@@ -23,5 +24,4 @@ def get_postges_connection():
         'host': settings['postgres_db_host'],
         'port': settings['postgres_db_port']
     }
-    conn = psycopg2.connect(**dsl, cursor_factory=psycopg2.extras.DictCursor)
-    return conn
+    return closing(psycopg2.connect(**dsl, cursor_factory=psycopg2.extras.DictCursor))

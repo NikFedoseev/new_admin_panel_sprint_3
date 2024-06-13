@@ -291,37 +291,37 @@ class ElasticsearchLoader:
 
 def main():
     logger.info('etl process started')
-    conn = get_postges_connection()
-    state = State(storage=JsonFileStorage(file_path=settings['storage_file_path']))
-    producer = PostgresProducer(conn=conn, extract_size=settings['etl_extract_size'])
-    enricher = PostgresEnricher(conn=conn)
-    merger = PostgresMerger(conn=conn)
-    transformer = Transformer()
-    loader = ElasticsearchLoader(
-        service_host=settings['elastic_host'],
-        service_port=settings['elastic_port'],
-        index=settings['elastic_index']
-    )
-
-    while True:
-        updates = producer.check_updates(
-            last_updated_time=state.get_state('modified') or settings['etl_start_time']
+    with get_postges_connection() as conn:
+        state = State(storage=JsonFileStorage(file_path=settings['storage_file_path']))
+        producer = PostgresProducer(conn=conn, extract_size=settings['etl_extract_size'])
+        enricher = PostgresEnricher(conn=conn)
+        merger = PostgresMerger(conn=conn)
+        transformer = Transformer()
+        loader = ElasticsearchLoader(
+            service_host=settings['elastic_host'],
+            service_port=settings['elastic_port'],
+            index=settings['elastic_index']
         )
 
-        for updated_table, updated_entities, modified in updates:
-            enriched_entities = enricher.enrich(table=updated_table, entity_ids=updated_entities)
-            merged_entities = merger.merge(enriched_entities)
-            transformed_entities = transformer.transform(merged_entities)
-            loader.upload(transformed_entities)
-            state.set_state(key='modified', value=modified.strftime('%Y-%m-%d %H:%M:%S.%f %z'))
-
-            logger.info(
-                f"{len(transformed_entities)} updates uploaded, slepping {settings['etl_iteration_sleep_time']} seconds"
+        while True:
+            updates = producer.check_updates(
+                last_updated_time=state.get_state('modified') or settings['etl_start_time']
             )
-            time.sleep(settings['etl_iteration_sleep_time'])
 
-        logger.info(f"no updates found, slepping {settings['etl_checking_updates_sleep_time']} seconds")
-        time.sleep(settings['etl_checking_updates_sleep_time'])
+            for updated_table, updated_entities, modified in updates:
+                enriched_entities = enricher.enrich(table=updated_table, entity_ids=updated_entities)
+                merged_entities = merger.merge(enriched_entities)
+                transformed_entities = transformer.transform(merged_entities)
+                loader.upload(transformed_entities)
+                state.set_state(key='modified', value=modified.strftime('%Y-%m-%d %H:%M:%S.%f %z'))
+
+                logger.info(
+                    f"{len(transformed_entities)} updates uploaded, slepping {settings['etl_iteration_sleep_time']} seconds"
+                )
+                time.sleep(settings['etl_iteration_sleep_time'])
+
+            logger.info(f"no updates found, slepping {settings['etl_checking_updates_sleep_time']} seconds")
+            time.sleep(settings['etl_checking_updates_sleep_time'])
 
 
 if __name__ == '__main__':
